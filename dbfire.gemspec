@@ -1,6 +1,6 @@
 Gem::Specification.new do |s|
   s.name        = 'dbfire'
-  s.version     = '0.0.1'
+  s.version     = '0.0.2'
   s.date        = '2016-05-29'
   s.summary     = "DBFire"
   s.description = "Simple, fast, standalone database load testing toolkid"
@@ -9,4 +9,5 @@ Gem::Specification.new do |s|
   s.files       = ["lib/dbfire/filesize.rb","bin/fire"]
   s.homepage    = 'https://github.com/m4rkw/dbfire'
   s.license     = 'MIT'
+  s.executables << 'fire'
 end
