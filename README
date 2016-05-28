@@ -1,0 +1,76 @@
+Database load testing toolkit
+=============================
+
+Fire is a tool I wrote to make database load testing easier.
+
+It spawns a thread for each file passed on the commandline and shows useful metrics and
+progress for each thread while it's running.
+
+The three key aims of this project are:
+
+Speed
+-----
+
+fire should not be significantly measurably slower than the longwinded manual processes
+it is designed to replace (eg spawning cat | mysql threads manually, having some way to
+monitor execution time, etc).  As far as I can tell this has been achieved.
+
+Simplicity
+----------
+
+fire requires no configuration other than a single environment variable and no other
+dependencies.
+
+Metrics and progress
+--------------------
+
+fire shows metrics, progress and ETA for each thread as it runs so you have some idea
+how long it will take.
+
+
+Installation
+------------
+
+$ sudo gem install fire
+
+
+Usage
+-----
+
+1. Capture some general.log
+
+2. Split the queries using:
+
+$ fire -s general.log 4
+
+where 4 is the number of threads you want to load-test with.
+
+alternatively you can split the log into {n} threads without separating the queries:
+
+$ fire -s general.log 4 all
+
+Only SELECT, INSERT, UPDATE and DELETE queries will be written to the new files.
+
+3. Export the cli path for your database client including all the options you want,
+connection password etc:
+
+export CLI="mysql -uroot -f -q -n mydatabase"
+
+Note that -q is advised for MySQL if you're going to be testing with a very large set
+of files, as this will stop the client caching all the query responses and exhausting
+the system memory.
+
+4. Execute fire and pass in the files you want to test with. It will automatically
+create a thread for each file, eg:
+
+$ fire SELECT.*
+
+
+Credit
+------
+
+Thanks to Dominik Honnef for Filesize.pretty which I have included with this gem rather
+than add the dependency as I wanted fire to be as easy for sysadmins to use as possible
+and not require installing other gems.
+
+

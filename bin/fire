@@ -1,0 +1,260 @@
+#!/usr/bin/ruby
+
+load File.dirname(__FILE__) + '/../lib/dbfire/filesize.rb'
+
+Thread.abort_on_exception = true
+
+$blocksize = 65536
+
+TYPE_PREFIXES = %w{Ki Mi Gi Ti Pi Ei Zi Yi}
+
+class Fire
+  def self.usage
+    puts "Database load testing toolkit by m4rkw\n\n"
+    puts "Usage: fire <file1> [file2] [..]\n\n"
+    puts "To split your general.log:\n\n"
+    puts "fire -s <general log> <threads> [all]\n\n"
+    exit
+  end
+
+  def initialize(args)
+    if args[0] == '-s'
+      if args.length <3
+        self.class.usage
+      end
+      split(args)
+      return
+    end
+
+    @cli_string = ENV['CLI']
+
+    if !@cli_string
+      raise "The environment variable CLI is not set. Please set this to your cli command to invoke the database client."
+    end
+
+    @queue = Queue.new
+
+    @start_time = Time.now.to_i
+
+    fire(ARGV)
+    display
+    monitor
+  end
+
+  def split(args)
+    thread_id = 0
+
+    File.open(args[1],"r:ascii-8bit").each do |line|
+      line.chomp!
+
+      m = line.match(/[\s\t]+[0-9]+ Query[\t\s]+(\/\*.*?\*\/)?(.*)/)
+
+      if m
+          word = m[2].split(" ").first
+
+          if ["SELECT","INSERT","UPDATE","DELETE"].include? word
+              if args[3] == 'all'
+                  target = "ALL.#{thread_id}"
+              else
+                  target = "#{word}.#{thread_id}"
+              end
+
+              File.open(target,'a+') do |out|
+                  out.write("#{m[2]};\n")
+              end
+
+              thread_id += 1
+
+              if thread_id >= args[2].to_i
+                  thread_id = 0
+              end
+          end
+      end
+    end
+  end
+
+  def fire(files)
+    @threads = []
+    @progress = []
+
+    for thread_id in 0...files.length
+      @progress[thread_id] = {
+        :total_bytes => File.size(files[thread_id]),
+        :sent => 0,
+        :sent_at_last_interval => 0,
+        :sent_speed => 0,
+        :recv => 0,
+        :recv_at_last_interval => 0,
+        :recv_speed => 0,
+        :timestamp => Time.now.to_i
+      }
+
+      thread = Thread.new(thread_id, files[thread_id]) do |tid, thread_file|
+        file_thread(tid, thread_file)
+      end
+
+      @threads.push thread
+    end
+  end
+
+  def file_thread(tid, thread_file)
+    bytes_sent = 0
+    bytes_read = 0
+
+    File.open(thread_file, "r:utf-8") do |file|
+      IO.popen(@cli_string, "a+") do |db|
+        data = nil
+
+        while not file.eof?
+          if !data
+            data = file.readline
+          end
+
+          begin
+            db.write_nonblock(data)
+            bytes_sent += data.length
+            data = nil
+            @queue << {:thread_id => tid, :sent => bytes_sent, :recv => bytes_read}
+          rescue IO::WaitWritable
+            begin
+              recv = db.read_nonblock($blocksize)
+              bytes_read += recv.length
+              @queue << {:thread_id => tid, :sent => bytes_sent, :recv => bytes_read}
+            rescue IO::WaitReadable
+            end
+          end
+        end
+
+        db.close_write
+
+        while not db.eof?
+          begin
+            recv = db.read_nonblock($blocksize)
+            bytes_read += recv.length
+            @queue << {:thread_id => tid, :sent => bytes_sent, :recv => bytes_read}
+          rescue
+            IO::WaitReadable
+          end
+        end
+      end
+    end
+  end
+
+  def monitor
+    Thread.new do
+      while 1
+        update
+        sleep 0.5
+      end
+    end
+
+    Thread.new do
+      last_update = nil
+
+      while 1
+        begin
+          value = @queue.pop
+          process_update(value)
+        rescue
+        end
+      end
+    end
+
+    @threads.each do |thread|
+      thread.join
+    end
+
+    execution_time = Time.at(Time.now.to_i - @start_time).utc.strftime("%H:%M:%S")
+
+    puts "\nFinished in: #{execution_time}\n\n"
+  end
+
+  def process_update(value)
+    @progress[value[:thread_id]][:sent] = value[:sent]
+    @progress[value[:thread_id]][:recv] = value[:recv]
+
+    time_now = Time.now.to_i
+    seconds_elapsed = time_now - @progress[value[:thread_id]][:timestamp]
+
+    if seconds_elapsed > 0
+      sent_diff = value[:sent] - @progress[value[:thread_id]][:sent_at_last_interval]
+      recv_diff = value[:recv] - @progress[value[:thread_id]][:recv_at_last_interval]
+
+      @progress[value[:thread_id]][:sent_speed] = sent_diff / seconds_elapsed
+      @progress[value[:thread_id]][:recv_speed] = recv_diff / seconds_elapsed
+      @progress[value[:thread_id]][:timestamp] = time_now
+      @progress[value[:thread_id]][:sent_at_last_interval] = value[:sent]
+      @progress[value[:thread_id]][:recv_at_last_interval] = value[:recv]
+    end
+  end
+
+  def display
+    output = []
+
+    for i in 0...@progress.length
+      pro = @progress[i][:sent]
+      total = @progress[i][:total_bytes]
+      pc = sprintf("%.2f", pro / (total.to_f / 100))
+      data_out = Filesize.from("#{@progress[i][:sent]} B").pretty
+      data_in = Filesize.from("#{@progress[i][:recv]} B").pretty
+
+      out_speed = Filesize.from("#{@progress[i][:sent_speed]} B").pretty + "/s"
+      in_speed = Filesize.from("#{@progress[i][:recv_speed]} B").pretty + "/s"
+
+      time_now = Time.now.to_i
+
+      if pro > 0 and (time_now - @start_time) >0
+        overall_speed = pro / (time_now - @start_time)
+
+        if overall_speed > 0
+          eta = (total - pro) / overall_speed
+          @progress[i][:eta] = Time.at(eta).utc.strftime("%H:%M:%S")
+        else
+          @progress[i][:eta] = "--"
+        end
+      else
+        @progress[i][:eta] = "--"
+      end
+
+      output.push([data_out, pc, out_speed, data_in, in_speed, @progress[i][:eta]])
+    end
+
+    format_output output, "%d: out: [%s] %s%% (%s)  in: [%s] (%s)  eta: %s"
+  end
+
+  def format_output(data, format)
+    width = []
+
+    for i in 0...data.length
+      for j in 0...data[i].length
+        if !width[j]
+          width[j] = data[i][j].length
+        elsif data[i][j].length > width[j]
+          width[j] = data[i][j].length
+        end
+      end
+    end
+
+    for i in 0...data.length
+      for j in 0...data[i].length
+        data[i][j] = data[i][j].rjust(width[j], ' ')
+      end
+      puts sprintf(format, i, *data[i])
+    end
+  end
+
+  def update
+    for i in 0...@progress.length
+      print "\e[A"
+      print "\e[K"
+    end
+
+    display
+  end
+end
+
+if ARGV.length == 0
+  Fire.usage
+end
+
+Fire.new(ARGV)
